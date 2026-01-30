@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Local File Encryptor — AES-GCM (browser)</title>
+<style>
+  :root{--bg:#0b1220;--card:#071124;--muted:#9aa4b2;--accent:#6ee7b7}
+  body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial;background:linear-gradient(180deg,#04101a,#071427);color:#eaf6f2;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+  .app{width:100%;max-width:980px;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));padding:20px;border-radius:12px;box-shadow:0 10px 30px rgba(2,6,23,0.7)}
+  h1{margin:0 0 8px 0;font-size:20px}
+  p.lead{margin:0 0 18px 0;color:var(--muted)}
+  .cols{display:grid;grid-template-columns:1fr 360px;gap:16px}
+  .panel{background:rgba(255,255,255,0.02);padding:14px;border-radius:10px;border:1px solid rgba(255,255,255,0.03)}
+  label{display:block;margin-bottom:8px;font-weight:700}
+  input[type=file]{width:100%}
+  input,select,textarea,button{font:inherit}
+  textarea{width:100%;height:72px;border-radius:8px;padding:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:inherit}
+  .row{display:flex;gap:8px;align-items:center}
+  .btn{padding:8px 12px;border-radius:10px;border:0;cursor:pointer;font-weight:700}
+  .btn-primary{background:linear-gradient(90deg,#22c1c3,#6ee7b7);color:#02111a}
+  .btn-ghost{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
+  .muted{color:var(--muted);font-size:13px}
+  .parts{display:grid;gap:8px;margin-top:8px}
+  .part{display:flex;gap:8px;align-items:center}
+  .part input{flex:1;padding:8px;border-radius:8px;background:transparent;border:1px solid rgba(255,255,255,0.04);color:inherit}
+  .footer{margin-top:14px;display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:13px}
+  @media (max-width:900px){.cols{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+  <div class="app">
+    <h1>Local File Encryptor — AES-GCM (browser only)</h1>
+    <p class="lead">Encrypt & decrypt files entirely in the browser. The encryption key is split into parts so you can store pieces separately for more safety.</p>
+
+    <div class="cols">
+      <div class="panel">
+        <label>Select file to encrypt</label>
+        <input id="fileInput" type="file" />
+        <div style="margin-top:10px" class="row">
+          <label style="margin:0">Number of key parts</label>
+          <select id="numParts">
+            <option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option>
+          </select>
+          <div style="flex:1"></div>
+          <button class="btn btn-primary" id="encryptBtn">Encrypt & Download</button>
+        </div>
+
+        <hr style="margin:12px 0;opacity:0.06" />
+        <div class="muted">Generated Key (Base64) — do NOT share all parts publicly</div>
+        <textarea id="fullKey" readonly placeholder="No key yet"></textarea>
+
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn btn-ghost" id="copyFull">Copy full key</button>
+          <button class="btn btn-ghost" id="downloadFull">Download key</button>
+          <div style="flex:1"></div>
+          <button class="btn btn-ghost" id="splitBtn">Split into parts</button>
+        </div>
+
+        <div style="margin-top:12px">
+          <div class="muted">Key parts (save each separately)</div>
+          <div id="partsContainer" class="parts"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <label>Decrypt an encrypted file</label>
+        <input id="encFile" type="file" />
+        <div style="margin-top:8px" class="muted">Provide the key (recombine parts into the box or paste full Base64 key)</div>
+        <textarea id="combinedKey" placeholder="Paste Base64 key here to decrypt"></textarea>
+
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn btn-primary" id="decryptBtn">Decrypt & Download</button>
+          <button class="btn btn-ghost" id="autoCombine">Auto combine parts</button>
+          <div style="flex:1"></div>
+          <button class="btn btn-ghost" id="clearAll">Clear</button>
+        </div>
+
+        <hr style="margin:12px 0;opacity:0.06" />
+        <div class="muted">Helpers</div>
+        <div style="margin-top:8px" class="muted">
+          • Click a part's copy button to copy that part. Use the parts as separate secrets.<br>
+          • The encrypted file contains a 12-byte IV followed by ciphertext. Do not edit the file.
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div>Local-only — browser Web Crypto (AES-GCM)</div>
+      <div id="status" class="muted">Ready</div>
+    </div>
+  </div>
+
+<script>
+/* Utilities: base64 <-> arraybuffer */
+function abToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0xffff;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+function base64ToAb(base64) {
+  const binary = atob(base64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+function showStatus(txt, ms=2400){ const s=document.getElementById('status'); s.textContent=txt; if(ms) setTimeout(()=>{ if(s.textContent===txt) s.textContent='Ready'}, ms); }
+
+/* Crypto helpers */
+async function generateKey() {
+  // AES-GCM 256
+  return crypto.subtle.generateKey({name: 'AES-GCM', length: 256}, true, ['encrypt','decrypt']);
+}
+async function exportKeyBase64(key) {
+  const raw = await crypto.subtle.exportKey('raw', key);
+  return abToBase64(raw);
+}
+async function importKeyFromBase64(b64) {
+  const raw = base64ToAb(b64);
+  return crypto.subtle.importKey('raw', raw, {name: 'AES-GCM'}, false, ['decrypt']);
+}
+async function encryptArrayBuffer(key, arrayBuffer) {
+  const iv = crypto.getRandomValues(new Uint8Array(12)); // 96-bit IV recommended
+  const cipher = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, arrayBuffer);
+  // return ArrayBuffer containing iv + ciphertext
+  const combined = new Uint8Array(iv.byteLength + cipher.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(cipher), iv.byteLength);
+  return combined.buffer;
+}
+async function decryptArrayBuffer(key, combinedArrayBuffer) {
+  const combined = new Uint8Array(combinedArrayBuffer);
+  const iv = combined.slice(0, 12);
+  const cipher = combined.slice(12);
+  const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv}, key, cipher);
+  return plain;
+}
+
+/* Split and assemble key */
+function splitStringByParts(str, n) {
+  const len = str.length;
+  const partLen = Math.floor(len / n);
+  const parts = [];
+  for (let i=0;i<n-1;i++){
+    parts.push(str.slice(i*partLen, (i+1)*partLen));
+  }
+  parts.push(str.slice((n-1)*partLen));
+  return parts;
+}
+
+/* DOM wiring */
+const fileInput = document.getElementById('fileInput');
+const encryptBtn = document.getElementById('encryptBtn');
+const fullKey = document.getElementById('fullKey');
+const splitBtn = document.getElementById('splitBtn');
+const partsContainer = document.getElementById('partsContainer');
+const numParts = document.getElementById('numParts');
+const copyFull = document.getElementById('copyFull');
+const downloadFull = document.getElementById('downloadFull');
+const encFile = document.getElementById('encFile');
+const combinedKey = document.getElementById('combinedKey');
+const decryptBtn = document.getElementById('decryptBtn');
+const autoCombine = document.getElementById('autoCombine');
+const clearAll = document.getElementById('clearAll');
+
+let lastGenerated = {keyBase64: '', parts: []};
+
+encryptBtn.addEventListener('click', async ()=>{
+  const file = fileInput.files[0];
+  if(!file){ showStatus('Select a file first', 2000); return; }
+  showStatus('Generating key...');
+  try {
+    const key = await generateKey();
+    const keyB64 = await exportKeyBase64(key);
+    fullKey.value = keyB64;
+    lastGenerated.keyBase64 = keyB64;
+    // read file
+    showStatus('Reading file...');
+    const arr = await file.arrayBuffer();
+    showStatus('Encrypting...');
+    const combined = await encryptArrayBuffer(key, arr);
+    // build blob and download
+    const blob = new Blob([combined], {type: 'application/octet-stream'});
+    const fileName = file.name + '.enc';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    showStatus('Encrypted → downloaded', 3000);
+    // auto split into parts UI
+    buildPartsUI(splitStringByParts(keyB64, Number(numParts.value)));
+  } catch(e) {
+    console.error(e);
+    showStatus('Encryption failed: '+ (e.message||e), 4000);
+  }
+});
+
+splitBtn.addEventListener('click', ()=>{
+  if(!lastGenerated.keyBase64) {
+    showStatus('No key to split — generate by encrypting a file first', 3000);
+    return;
+  }
+  const parts = splitStringByParts(lastGenerated.keyBase64, Number(numParts.value));
+  lastGenerated.parts = parts;
+  buildPartsUI(parts);
+  showStatus('Key split into parts');
+});
+
+function buildPartsUI(parts) {
+  partsContainer.innerHTML = '';
+  parts.forEach((p,i)=>{
+    const row = document.createElement('div');
+    row.className='part';
+    const inp = document.createElement('input');
+    inp.value = p;
+    inp.readOnly = true;
+    const copyBtn = document.createElement('button');
+    copyBtn.className='btn btn-ghost';
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', ()=>{ navigator.clipboard.writeText(p).then(()=>showStatus('Part copied'))});
+    const saveBtn = document.createElement('button');
+    saveBtn.className='btn btn-ghost';
+    saveBtn.textContent = 'Download';
+    saveBtn.addEventListener('click', ()=> {
+      const blob = new Blob([p], {type:'text/plain'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `key_part_${i+1}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      showStatus('Part downloaded');
+    });
+    row.appendChild(inp);
+    row.appendChild(copyBtn);
+    row.appendChild(saveBtn);
+    partsContainer.appendChild(row);
+  });
+}
+
+copyFull.addEventListener('click', ()=> {
+  if(!fullKey.value) { showStatus('No key to copy'); return; }
+  navigator.clipboard.writeText(fullKey.value).then(()=>showStatus('Full key copied'));
+});
+downloadFull.addEventListener('click', ()=> {
+  if(!fullKey.value) { showStatus('No key'); return; }
+  const blob = new Blob([fullKey.value], {type:'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'key_full.txt';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  showStatus('Full key downloaded');
+});
+
+autoCombine.addEventListener('click', ()=> {
+  // try to combine parts from UI if present
+  const inputs = partsContainer.querySelectorAll('input');
+  if(!inputs.length){ showStatus('No parts found in UI to combine'); return; }
+  const combined = Array.from(inputs).map(i=>i.value).join('');
+  combinedKey.value = combined;
+  showStatus('Parts combined into key box');
+});
+
+decryptBtn.addEventListener('click', async ()=>{
+  const file = encFile.files[0];
+  if(!file){ showStatus('Select encrypted file first',2000); return; }
+  const keyStr = combinedKey.value.trim();
+  if(!keyStr){ showStatus('Provide combined Base64 key',2000); return; }
+  try {
+    showStatus('Importing key...');
+    const key = await importKeyFromBase64(keyStr);
+    showStatus('Reading file...');
+    const arr = await file.arrayBuffer();
+    showStatus('Decrypting...');
+    const plain = await decryptArrayBuffer(key, arr);
+    // download decrypted file — try to restore original name
+    let originalName = file.name;
+    if(originalName.endsWith('.enc')) originalName = originalName.slice(0, -4);
+    const a = document.createElement('a');
+    const blob = new Blob([plain]);
+    a.href = URL.createObjectURL(blob);
+    a.download = originalName + '.dec';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    showStatus('Decrypted → downloaded', 4000);
+  } catch(e) {
+    console.error(e);
+    showStatus('Decryption failed: '+(e.message||e), 6000);
+  }
+});
+
+clearAll.addEventListener('click', ()=> {
+  fileInput.value = '';
+  encFile.value = '';
+  fullKey.value = '';
+  combinedKey.value = '';
+  partsContainer.innerHTML = '';
+  lastGenerated = {keyBase64:'', parts:[]};
+  showStatus('Cleared');
+});
+
+</script>
+</body>
+</html>
